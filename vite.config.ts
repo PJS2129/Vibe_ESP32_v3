@@ -65,6 +65,8 @@ ESP32 / MICROPYTHON HARDWARE CONSTRAINTS (follow strictly):
 - Always declare modified globals with the 'global' keyword inside functions
 - Every while True loop must contain time.sleep_ms(10) or equivalent to prevent watchdog timer resets
 - Wrap all hardware I/O (sensors, I2C, SPI, network, file) in try-except blocks
+- NEVER use sys.stdin.readable(), sys.stdin.writable(), sys.stdin.buffer, or sys.stdin.any() — these do NOT exist in MicroPython. For NON-BLOCKING serial input use select.poll(): import select; poller = select.poll(); poller.register(sys.stdin, select.POLLIN); then in the loop: if poller.poll(0): data = sys.stdin.read(1). For blocking input use sys.stdin.readline() directly.
+- When reading single characters with sys.stdin.read(1) in a loop, ALWAYS skip '\r' and '\n' immediately after reading (serial clients always append these as line terminators): if data in ('\r', '\n', ' '): continue
 - Available built-in libraries: machine, time, network, socket, random, os, sys, ubinascii, neopixel, dht
 - Valid ESP32 GPIO pins: 0,2,4,5,12,13,14,15,16,17,18,19,21,22,23,25,26,27,32,33,34,35,36,39
 - GPIO 34, 35, 36, 39 are INPUT ONLY — never configure them as output
@@ -546,65 +548,51 @@ __EXPLANATION__
 ▶️ sensor_id = self.i2c.readfrom_mem(self.address, 0x92, 1)[0]
   SoftI2C 객체의 readfrom_mem() 메서드를 사용하여 센서 주소(0x29)의 레지스터 주소 0x92(ID 레지스터)로부터 1바이트 크기의 값을 조회합니다. 이 반환된 바이트 리스트의 첫 번째 요소([0])를 검증하여 칩의 고유 식별 번호가 유효한지 확인합니다.
 ▶️ self.i2c.writeto_mem(self.address, 0x80, b'\\x03')
-  센서의 내부 0x80 제어 레지스터 메모리에 1바이트 바이너리 데이터 0x03을 직접 입력하는 메서드입니다. 센서 내부의 RGBC 적분기(ADC) 및 내부 전원을 깨워 실질적인 동작(Active)을 지시합니다.
-▶️ ustruct.unpack('<H', data[0:2])[0]
-  ustruct 모듈의 unpack() 함수를 활용하여 2바이트 크기의 원시 바이너리 스트림 데이터를 튜플 형태로 변환 디코딩합니다. 포맷 지시자 <H는 리틀 엔디언(Little-Endian) 방식의 부호 없는 2바이트 정수형(Unsigned Short) 형식임을 나타냅니다.
-▶️ r_scale = int((r / c) * 255 * 1.5)
-  수집된 원시 적색 조도값(r)을 전체 수광 광량(c)으로 나누어 명도 변화에 중립적인 순수 색상비를 추출합니다. 여기에 8비트 상한 상수인 255와 시인성 보정을 위한 상수 1.5를 곱해 형변환(int)을 가하는 색상 보정 수식입니다.
-▶️ red = min(max(r_scale, 0), 255)
-  수치 처리된 데이터가 8비트 가용 컬러 범위(0~255)를 벗어나 오버플로우나 언더플로우를 일으키지 않도록 최소 제한(max)과 최대 제한(min) 중첩 함수를 사용하여 데이터를 안전한 한계 내로 고정 및 클리핑합니다.`;
+  센서의 내부 0x80 제어 레지스터 메모리에 1바이트 바이너리 데이터 0x03을 직접 입력하는 메서드입니다. 센서 �                const cleanPrompt = prompt.toLowerCase().replace(/\s+/g, '');
+                
+                // Define normalized template prompts for exact matching
+                const tcsPrompt = 'gpio17(sda)과gpio16(scl)에연결된tcs34725컬러센서에서컬러값을읽어와,감지한색상과동일한색으로gpio14에연결된neopixelled를켜는스마트무드등코드를작성해줘.'.toLowerCase().replace(/\s+/g, '');
+                const weatherPrompt = '오픈웨더맵api를활용하여서울의실시간날씨를가져와시리얼모니터와oled디스플레이에출력하고,날씨정보에따라neopixel색상을파란색(비/눈),주황색(맑음),흰색(흐림)등으로제어하는코드를작성해줘.'.toLowerCase().replace(/\s+/g, '');
+                const tetrisPrompt = 'softi2c와ssd1306을사용해128x64oled디스플레이에서구동되는테트리스게임코드를작성해줘.'.toLowerCase().replace(/\s+/g, '');
+                const dhtPrompt = 'gpio27번에연결된dht11센서에서온도와습도를2초간격으로읽어와서터미널에출력해줘.센서오류예외처리도포함해줘.'.toLowerCase().replace(/\s+/g, '');
+                const neoPrompt = 'gpio14번에연결된12구neopixelled바에무지개회전효과(rainbowcycle)를내는코드를작성해줘.'.toLowerCase().replace(/\s+/g, '');
+                const webserverPrompt = 'esp32가wifi에접속한후간단한웹서버를열어서,접속한클라이언트에게"hellofromvibeesp32!"메시지를담은html페이지를반환하는코드를작성해줘.'.toLowerCase().replace(/\s+/g, '');
+                const ledPrompt = 'esp32내장led(gpio2번)를0.5초간격으로깜빡이는무한루프코드를작성해줘.'.toLowerCase().replace(/\s+/g, '');
+                const wifiPrompt = 'esp32를특정wifissid와password에연결하고,연결에성공하면ip주소를터미널에출력하는코드를작성해줘.'.toLowerCase().replace(/\s+/g, '');
 
-const TETRIS_CODE = `import machine
-import time
-import random
-from machine import Pin, SoftI2C
-import ssd1306
-
-# 1. 하드웨어 설정
-i2c = SoftI2C(scl=Pin(22), sda=Pin(21))
-oled = ssd1306.SSD1306_I2C(128, 64, i2c)
-
-touch_left  = Pin(33, Pin.IN)
-touch_right = Pin(32, Pin.IN)
-touch_rot   = Pin(35, Pin.IN)
-touch_drop  = Pin(34, Pin.IN)
-
-# 2. 게임 영역 및 그래픽 크기 정의 (화면 절반 크기로 확장)
-BOARD_WIDTH = 10
-BOARD_HEIGHT = 20
-
-BLOCK_SIZE_X = 6
-BLOCK_SIZE_Y = 3
-
-OFFSET_X = 2
-OFFSET_Y = 2
-
-# 3. 테트리스 미노(블록) 모양 정의
-SHAPES = [
-    [[1, 1, 1, 1]],
-    [[1, 1, 1], [0, 1, 0]],
-    [[1, 1, 1], [1, 0, 0]],
-    [[1, 1, 1], [0, 0, 1]],
-    [[1, 1], [1, 1]],
-    [[1, 1, 0], [0, 1, 1]],
-    [[0, 1, 1], [1, 1, 0]]
-]
-
-board = [[0] * BOARD_WIDTH for _ in range(BOARD_HEIGHT)]
-score = 0
-game_over = False
-
-current_piece = None
-piece_x = 0
-piece_y = 0
-
-def get_new_piece():
-    global current_piece, piece_x, piece_y
-    current_piece = random.choice(SHAPES)
-    piece_x = BOARD_WIDTH // 2 - len(current_piece[0]) // 2
-    piece_y = 0
-
-def rotate_piece(shape):
+                // Intercept only when they are exact template selections
+                if (cleanPrompt === tcsPrompt) {
+                  await writeStaticCodeStream(res, TCS34725_CODE);
+                  return;
+                }
+                if (cleanPrompt === weatherPrompt) {
+                  await writeStaticCodeStream(res, WEATHER_CODE);
+                  return;
+                }
+                if (cleanPrompt === tetrisPrompt) {
+                  await writeStaticCodeStream(res, TETRIS_CODE);
+                  return;
+                }
+                if (cleanPrompt === dhtPrompt) {
+                  await writeStaticCodeStream(res, DHT11_CODE);
+                  return;
+                }
+                if (cleanPrompt === neoPrompt) {
+                  await writeStaticCodeStream(res, NEOPIXEL_CODE);
+                  return;
+                }
+                if (cleanPrompt === webserverPrompt) {
+                  await writeStaticCodeStream(res, WEBSERVER_CODE);
+                  return;
+                }
+                if (cleanPrompt === ledPrompt) {
+                  await writeStaticCodeStream(res, LED_CODE);
+                  return;
+                }
+                if (cleanPrompt === wifiPrompt) {
+                  await writeStaticCodeStream(res, WIFI_CODE);
+                  return;
+                }def rotate_piece(shape):
     return [list(x) for x in zip(*shape[::-1])]
 
 def check_collision(piece, offset_x, offset_y):
@@ -789,39 +777,22 @@ export default defineConfig({
                 }
 
                 const cleanPrompt = prompt.toLowerCase().replace(/\s+/g, '');
-                
-                // Intercept suggestions locally - check specific modules first to prevent general keywords (like wifi or neopixel) from intercepting them
-                if (cleanPrompt.includes('tcs34725') || cleanPrompt.includes('컬러센서')) {
-                  await writeStaticCodeStream(res, TCS34725_CODE);
-                  return;
-                }
-                if (cleanPrompt.includes('서울날씨') || cleanPrompt.includes('서울의실시간날씨') || (cleanPrompt.includes('날씨') && cleanPrompt.includes('서울'))) {
-                  await writeStaticCodeStream(res, WEATHER_CODE);
-                  return;
-                }
-                if (cleanPrompt.includes('테트리스') || cleanPrompt.includes('tetris') || cleanPrompt.includes('게임')) {
-                  await writeStaticCodeStream(res, TETRIS_CODE);
-                  return;
-                }
 
-                if (cleanPrompt.includes('dht11') || cleanPrompt.includes('온습도') || cleanPrompt.includes('dht') || cleanPrompt.includes('27번')) {
-                  await writeStaticCodeStream(res, DHT11_CODE);
-                  return;
-                }
-                if (cleanPrompt.includes('neopixel') || cleanPrompt.includes('네오픽셀') || cleanPrompt.includes('무지개') || cleanPrompt.includes('14번')) {
-                  await writeStaticCodeStream(res, NEOPIXEL_CODE);
-                  return;
-                }
-                if (cleanPrompt.includes('웹서버') || cleanPrompt.includes('webserver') || cleanPrompt.includes('웹페이지') || cleanPrompt.includes('소켓') || cleanPrompt.includes('서버')) {
-                  await writeStaticCodeStream(res, WEBSERVER_CODE);
-                  return;
-                }
-                if (cleanPrompt.includes('led') && (cleanPrompt.includes('깜빡') || cleanPrompt.includes('반복') || cleanPrompt.includes('1초'))) {
-                  await writeStaticCodeStream(res, LED_CODE);
-                  return;
-                }
-                if (cleanPrompt.includes('wifi') || cleanPrompt.includes('와이파이') || cleanPrompt.includes('인터넷')) {
-                  await writeStaticCodeStream(res, WIFI_CODE);
+                // Only intercept exact template suggestion button prompts — custom user input always goes to the AI
+                // Note: TETRIS_CODE is not defined in this file so tetris requests go directly to Gemini
+                const TEMPLATE_MAP: [string, string][] = [
+                  ['esp32내장led(gpio2번)를0.5초간격으로깜빡이는무한루프코드를작성해줘.', LED_CODE],
+                  ['esp32를특정wifissid와password에연결하고,연결에성공하면ip주소를터미널에출력하는코드를작성해줘.', WIFI_CODE],
+                  ['gpio27번에연결된dht11센서에서온도와습도를2초간격으로읽어와서터미널에출력해줘.센서오류예외처리도포함해줘.', DHT11_CODE],
+                  ['gpio14번에연결된12구neopixelled바에무지개회전효과(rainbowcycle)를내는코드를작성해줘.', NEOPIXEL_CODE],
+                  ['esp32가wifi에접속한후간단한웹서버를열어서,접속한클라이언트에게"hellofromvibeesp32!"메시지를담은html페이지를반환하는코드를작성해줘.', WEBSERVER_CODE],
+                  ['오픈웨더맵api를활용하여서울의실시간날씨를가져와시리얼모니터와oled디스플레이에출력하고,날씨정보에따라neopixel색상을파란색(비/눈),주황색(맑음),흰색(흐림)등으로제어하는코드를작성해줘.', WEATHER_CODE],
+                  ['gpio17(sda)과gpio16(scl)에연결된tcs34725컬러센서에서컬러값을읽어와,감지한색상과동일한색으로gpio14에연결된neopixelled를켜는스마트무드등코드를작성해줘.', TCS34725_CODE],
+                ];
+
+                const matched = TEMPLATE_MAP.find(([key]) => cleanPrompt === key);
+                if (matched) {
+                  await writeStaticCodeStream(res, matched[1]);
                   return;
                 }
 

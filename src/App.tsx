@@ -25,7 +25,9 @@ import {
   History,
   Clock,
   User as UserIcon,
-  Info
+  Info,
+  Video,
+  Activity
 } from 'lucide-react';
 import { ESPLoader, Transport } from 'esptool-js';
 import { templates } from './templates';
@@ -204,9 +206,54 @@ class TCS34725:
         return r, g, b, c
 `;
 
+// Teachable Machine SDK Scripts Loader helper
+const loadTeachableMachineScripts = (): Promise<void> => {
+  return new Promise((resolve, reject) => {
+    if ((window as any).tmImage && (window as any).tf) {
+      resolve();
+      return;
+    }
+
+    const loadScript = (src: string): Promise<void> => {
+      return new Promise((res, rej) => {
+        const existing = document.querySelector(`script[src="${src}"]`);
+        if (existing) {
+          const status = existing.getAttribute('data-status');
+          if (status === 'ready') {
+            res();
+            return;
+          }
+          existing.addEventListener('load', () => res());
+          existing.addEventListener('error', () => rej(new Error(`Failed to load ${src}`)));
+          return;
+        }
+
+        const script = document.createElement('script');
+        script.src = src;
+        script.async = true;
+        script.setAttribute('data-status', 'loading');
+        script.onload = () => {
+          script.setAttribute('data-status', 'ready');
+          res();
+        };
+        script.onerror = () => {
+          script.setAttribute('data-status', 'error');
+          rej(new Error(`Failed to load script: ${src}`));
+        };
+        document.body.appendChild(script);
+      });
+    };
+
+    loadScript('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js')
+      .then(() => loadScript('https://cdn.jsdelivr.net/npm/@teachablemachine/image@latest/dist/teachablemachine-image.min.js'))
+      .then(() => resolve())
+      .catch(err => reject(err));
+  });
+};
+
 export default function App() {
   // Main Tab State
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'tools' | 'history'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'tools' | 'history' | 'ai-cam'>('dashboard');
 
   // Firebase auth & history states
   const [user, setUser] = useState<User | null>(null);
@@ -245,10 +292,27 @@ export default function App() {
   );
   const [isGenerating, setIsGenerating] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [serialInput, setSerialInput] = useState<string>('');
   
   // UI states
   const [editorTab, setEditorTab] = useState<'preview' | 'edit' | 'explain'>('preview');
   const [copied, setCopied] = useState(false);
+
+  // AI Camera States
+  const [modelUrl, setModelUrl] = useState<string>('');
+  const [isModelLoading, setIsModelLoading] = useState<boolean>(false);
+  const [modelLoaded, setModelLoaded] = useState<boolean>(false);
+  const [classes, setClasses] = useState<string[]>([]);
+  const [predictions, setPredictions] = useState<{ className: string; probability: number }[]>([]);
+  const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
+  const [selectedDeviceId, setSelectedDeviceId] = useState<string>('');
+  const [isCameraOn, setIsCameraOn] = useState<boolean>(false);
+  const [isPredicting, setIsPredicting] = useState<boolean>(false);
+  const [isSerialSendActive, setIsSerialSendActive] = useState<boolean>(false);
+  const [sendInterval, setSendInterval] = useState<number>(500);
+  const [probabilityThreshold, setProbabilityThreshold] = useState<number>(0.75);
+  const [classMappings, setClassMappings] = useState<Record<string, string>>({});
+  const [aiSerialLogs, setAiSerialLogs] = useState<string[]>([]);
   
   // Refs for scroll and connection control
   const terminalEndRef = useRef<HTMLDivElement>(null);
@@ -260,6 +324,15 @@ export default function App() {
   const previewCodeRef = useRef<HTMLDivElement>(null);
   const explanationContainerRef = useRef<HTMLDivElement>(null);
   const terminalPreRef = useRef<HTMLPreElement>(null);
+
+  // AI Camera Refs
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const modelRef = useRef<any>(null);
+  const cameraStreamRef = useRef<MediaStream | null>(null);
+  const predictionLoopRef = useRef<number | null>(null);
+  const lastSentTimeRef = useRef<number>(0);
+  const aiSerialLogsContainerRef = useRef<HTMLDivElement | null>(null);
+  const isSerialSendActiveRef = useRef<boolean>(false);
 
   // Sync terminal scroll
   useEffect(() => {
@@ -725,6 +798,18 @@ export default function App() {
     }, 150);
   };
 
+  // Web Serial API - Send manual serial input (like Thonny shell)
+  const sendSerialInput = async () => {
+    if (!isConnected || !port || !serialInput.trim()) return;
+    try {
+      await writeToSerialPort(serialInput + '\r\n');
+      setTerminalOutput(prev => prev + `>>> ${serialInput}\n`);
+      setSerialInput('');
+    } catch (err: any) {
+      setTerminalOutput(prev => prev + `[시스템] 입력 전송 실패: ${err.message}\n`);
+    }
+  };
+
   // Web Serial API - Stop Execution
   const stopCode = async () => {
     if (!isConnected || !port) {
@@ -740,6 +825,187 @@ export default function App() {
       setTerminalOutput(`[시스템] 중지 오류: ${err.message}\n`);
     }
   };
+
+  // AI Camera - Enumerate video devices
+  const getCameraDevices = async () => {
+    try {
+      const deviceInfos = await navigator.mediaDevices.enumerateDevices();
+      const videoDevices = deviceInfos.filter(device => device.kind === 'videoinput');
+      setDevices(videoDevices);
+      if (videoDevices.length > 0 && !selectedDeviceId) {
+        setSelectedDeviceId(videoDevices[0].deviceId);
+      }
+    } catch (err) {
+      console.error('Error enumerating video devices:', err);
+    }
+  };
+
+  useEffect(() => {
+    getCameraDevices();
+  }, []);
+
+  // AI Camera - Stream Control
+  const startCamera = async () => {
+    try {
+      if (cameraStreamRef.current) {
+        stopCamera();
+      }
+
+      const constraints = {
+        video: selectedDeviceId ? { deviceId: { exact: selectedDeviceId } } : true
+      };
+
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      cameraStreamRef.current = stream;
+      setIsCameraOn(true);
+
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        videoRef.current.play();
+      }
+
+      getCameraDevices();
+    } catch (err: any) {
+      console.error('Error starting camera:', err);
+      alert(`카메라를 시작할 수 없습니다: ${err.message}`);
+    }
+  };
+
+  const stopCamera = () => {
+    stopPredictionLoop();
+    if (cameraStreamRef.current) {
+      cameraStreamRef.current.getTracks().forEach(track => track.stop());
+      cameraStreamRef.current = null;
+    }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+    setIsCameraOn(false);
+  };
+
+  // AI Camera - Load Teachable Machine Model
+  const loadTeachableModel = async () => {
+    if (!modelUrl.trim()) {
+      alert('티쳐블 머신 모델 URL을 입력해 주세요.');
+      return;
+    }
+
+    let formattedUrl = modelUrl.trim();
+    if (!formattedUrl.endsWith('/')) {
+      formattedUrl += '/';
+    }
+
+    setIsModelLoading(true);
+    try {
+      await loadTeachableMachineScripts();
+
+      const checkpointURL = formattedUrl + 'model.json';
+      const metadataURL = formattedUrl + 'metadata.json';
+
+      const model = await (window as any).tmImage.load(checkpointURL, metadataURL);
+      modelRef.current = model;
+
+      const classNames = model.getClassLabels();
+      setClasses(classNames);
+
+      const initialMappings: Record<string, string> = { ...classMappings };
+      classNames.forEach((name: string) => {
+        if (!initialMappings[name]) {
+          initialMappings[name] = '';
+        }
+      });
+      setClassMappings(initialMappings);
+
+      setModelLoaded(true);
+      alert('모델이 성공적으로 로드되었습니다!');
+    } catch (err: any) {
+      console.error('Error loading Teachable Machine model:', err);
+      alert(`모델을 로드할 수 없습니다. URL을 확인해 주세요. 에러: ${err.message}`);
+    } finally {
+      setIsModelLoading(false);
+    }
+  };
+
+  // AI Camera - Prediction Loop
+  const startPredictionLoop = () => {
+    if (!modelRef.current || !cameraStreamRef.current) return;
+    setIsPredicting(true);
+    lastSentTimeRef.current = 0;
+    predictionLoopRef.current = requestAnimationFrame(predictFrame);
+  };
+
+  const stopPredictionLoop = () => {
+    setIsPredicting(false);
+    if (predictionLoopRef.current) {
+      cancelAnimationFrame(predictionLoopRef.current);
+      predictionLoopRef.current = null;
+    }
+    setPredictions([]);
+  };
+
+  const predictFrame = async () => {
+    if (!modelRef.current || !videoRef.current || !cameraStreamRef.current) return;
+
+    try {
+      const prediction = await modelRef.current.predict(videoRef.current);
+      setPredictions(prediction);
+
+      if (isSerialSendActiveRef.current && isConnected && port) {
+        const now = Date.now();
+        if (now - lastSentTimeRef.current >= sendInterval) {
+          let topClass: any = null;
+          let maxProb = -1;
+
+          for (const p of prediction) {
+            if (p.probability > maxProb) {
+              maxProb = p.probability;
+              topClass = p.className;
+            }
+          }
+
+          if (topClass && maxProb >= probabilityThreshold) {
+            const mappedCommand = classMappings[topClass];
+            if (mappedCommand && mappedCommand.trim()) {
+              const timeString = new Date().toLocaleTimeString('ko-KR');
+              try {
+                await writeToSerialPort(mappedCommand.trim() + '\n');
+                const logMsg = `[${timeString}] '${topClass}' 감지 (${(maxProb * 100).toFixed(0)}%) -> '${mappedCommand.trim()}' 전송 완료`;
+                setAiSerialLogs(prev => [...prev.slice(-99), logMsg]);
+                lastSentTimeRef.current = now;
+              } catch (sendErr: any) {
+                const logMsg = `[${timeString}] 전송 실패: ${sendErr.message}`;
+                setAiSerialLogs(prev => [...prev.slice(-99), logMsg]);
+              }
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.error('Prediction frame error:', err);
+    }
+
+    if (predictionLoopRef.current !== null) {
+      predictionLoopRef.current = requestAnimationFrame(predictFrame);
+    }
+  };
+
+  // Sync isSerialSendActive state to ref so predictFrame always reads the latest value
+  useEffect(() => {
+    isSerialSendActiveRef.current = isSerialSendActive;
+  }, [isSerialSendActive]);
+
+  // AI Camera - Scroll log container internally (not the page)
+  useEffect(() => {
+    if (aiSerialLogsContainerRef.current) {
+      aiSerialLogsContainerRef.current.scrollTop = aiSerialLogsContainerRef.current.scrollHeight;
+    }
+  }, [aiSerialLogs]);
+
+  useEffect(() => {
+    if (activeTab !== 'ai-cam') {
+      stopCamera();
+    }
+  }, [activeTab]);
 
   // Helper to reliably stop execution and enter Raw REPL
   const enterRawREPL = async (activePort: any = port) => {
@@ -1443,6 +1709,16 @@ export default function App() {
         {/* Navigation Tabs */}
         <div className="flex p-1 bg-slate-100 border border-slate-200 rounded-xl">
           <button
+            onClick={() => setActiveTab('tools')}
+            className={`px-4 py-2 sm:px-6 sm:py-3 text-sm sm:text-base md:text-lg font-black font-title tracking-wide rounded-lg transition-all ${
+              activeTab === 'tools'
+                ? 'bg-white text-indigo-600 shadow-sm'
+                : 'text-slate-500 hover:text-slate-700'
+            }`}
+          >
+            ⚙️ 보드 도구
+          </button>
+          <button
             onClick={() => setActiveTab('dashboard')}
             className={`px-4 py-2 sm:px-6 sm:py-3 text-sm sm:text-base md:text-lg font-black font-title tracking-wide rounded-lg transition-all ${
               activeTab === 'dashboard'
@@ -1453,14 +1729,14 @@ export default function App() {
             🔌 바이브 대시보드
           </button>
           <button
-            onClick={() => setActiveTab('tools')}
+            onClick={() => setActiveTab('ai-cam')}
             className={`px-4 py-2 sm:px-6 sm:py-3 text-sm sm:text-base md:text-lg font-black font-title tracking-wide rounded-lg transition-all ${
-              activeTab === 'tools'
+              activeTab === 'ai-cam'
                 ? 'bg-white text-indigo-600 shadow-sm'
                 : 'text-slate-500 hover:text-slate-700'
             }`}
           >
-            ⚙️ 보드 도구 (Tools)
+            🤖 AI 카메라
           </button>
           <button
             onClick={() => setActiveTab('history')}
@@ -1808,8 +2084,8 @@ export default function App() {
                 )}
               </div>
 
-              {/* Serial Terminal Monitor Card - Pastel Sky Blue (Strictly fixed height h-[450px]) */}
-              <div className="bg-sky-50/80 border border-sky-100/90 rounded-2xl flex flex-col h-[450px] shadow-sm overflow-hidden flex-shrink-0">
+              {/* Serial Terminal Monitor Card - Pastel Sky Blue (Strictly fixed height h-[500px]) */}
+              <div className="bg-sky-50/80 border border-sky-100/90 rounded-2xl flex flex-col h-[500px] shadow-sm overflow-hidden flex-shrink-0">
                 
                 {/* Terminal Window Header */}
                 <div className="px-4 py-3 border-b border-sky-100 flex justify-between items-center flex-shrink-0">
@@ -1838,6 +2114,27 @@ export default function App() {
                     <span className="terminal-cursor ml-0.5 text-sky-600" />
                   </pre>
                   <div ref={terminalEndRef} />
+                </div>
+
+                {/* Serial Shell Input (like Thonny) */}
+                <div className="px-4 pb-4 flex gap-2 flex-shrink-0">
+                  <input
+                    type="text"
+                    value={serialInput}
+                    onChange={(e) => setSerialInput(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') sendSerialInput(); }}
+                    placeholder={isConnected ? "명령어 입력 후 Enter (예: LED_ON)" : "보드 연결 후 사용 가능"}
+                    disabled={!isConnected}
+                    className="flex-1 bg-white border border-sky-200 rounded-xl px-3 py-2 text-xs font-mono text-slate-800 placeholder:text-slate-400 focus:outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500 disabled:bg-slate-100 disabled:text-slate-400 transition-all"
+                  />
+                  <button
+                    onClick={sendSerialInput}
+                    disabled={!isConnected || !serialInput.trim()}
+                    className="px-4 py-2 bg-sky-600 hover:bg-sky-500 disabled:bg-slate-200 disabled:text-slate-400 text-white rounded-xl font-bold text-xs flex items-center gap-1.5 transition-all shadow-sm disabled:pointer-events-none active:scale-95"
+                  >
+                    <Send className="w-3.5 h-3.5" />
+                    전송
+                  </button>
                 </div>
               </div>
             </section>
@@ -2114,7 +2411,7 @@ export default function App() {
 
             </section>
           </div>
-        ) : (
+        ) : activeTab === 'history' ? (
           /* History Layout */
           <div className="max-w-4xl mx-auto flex flex-col gap-6">
             <div className="flex items-center justify-between border-b border-slate-200 pb-4">
@@ -2316,6 +2613,347 @@ export default function App() {
               </div>
             )}
           </div>
+        ) : (
+          /* AI Camera Layout (Teachable Machine) */
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+            {/* Left Column - Web Cam & Real-time Analysis */}
+            <section className="lg:col-span-6 flex flex-col gap-6">
+              
+              {/* Webcam Control Card */}
+              <div className="bg-amber-50/80 border border-amber-100/90 rounded-2xl p-5 flex flex-col gap-4 shadow-sm">
+                <div className="flex items-center justify-between text-amber-800">
+                  <div className="flex items-center gap-2">
+                    <Video className="w-5.5 h-5.5" />
+                    <h2 className="text-lg sm:text-xl font-black tracking-wide font-title">
+                      카메라 스트림
+                    </h2>
+                  </div>
+                  {isCameraOn && (
+                    <span className="flex h-2.5 w-2.5 relative">
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                      <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
+                    </span>
+                  )}
+                </div>
+
+                {/* Device Selector */}
+                <div className="flex flex-col gap-1.5">
+                  <span className="text-[10px] text-amber-700 font-bold uppercase tracking-wider">
+                    비디오 입력 장치 선택
+                  </span>
+                  <select
+                    id="camera-select"
+                    value={selectedDeviceId}
+                    onChange={(e) => {
+                      setSelectedDeviceId(e.target.value);
+                      if (isCameraOn) {
+                        setTimeout(() => startCamera(), 100);
+                      }
+                    }}
+                    disabled={devices.length === 0}
+                    className="w-full bg-white border border-amber-200/60 rounded-xl px-3.5 py-2 text-xs text-slate-700 focus:outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500 transition-all shadow-inner"
+                  >
+                    {devices.length === 0 ? (
+                      <option>감지된 비디오 장치가 없습니다</option>
+                    ) : (
+                      devices.map((device, idx) => (
+                        <option key={device.deviceId} value={device.deviceId}>
+                          {device.label || `카메라 ${idx + 1}`}
+                        </option>
+                      ))
+                    )}
+                  </select>
+                </div>
+
+                {/* Camera Control Action Buttons */}
+                <div className="grid grid-cols-2 gap-3">
+                  {isCameraOn ? (
+                    <button
+                      onClick={stopCamera}
+                      className="flex items-center justify-center gap-2 py-3 bg-rose-600 hover:bg-rose-500 text-white rounded-xl font-black font-title text-sm transition-all shadow-sm active:scale-95 cursor-pointer"
+                    >
+                      <Square className="w-4 h-4 fill-current" />
+                      카메라 끄기
+                    </button>
+                  ) : (
+                    <button
+                      onClick={startCamera}
+                      className="flex items-center justify-center gap-2 py-3 bg-amber-600 hover:bg-amber-500 text-white rounded-xl font-black font-title text-sm transition-all shadow-sm active:scale-95 cursor-pointer"
+                    >
+                      <Play className="w-4 h-4 fill-current" />
+                      카메라 켜기
+                    </button>
+                  )}
+
+                  {isPredicting ? (
+                    <button
+                      onClick={stopPredictionLoop}
+                      className="flex items-center justify-center gap-2 py-3 bg-rose-600 hover:bg-rose-500 text-white rounded-xl font-black font-title text-sm transition-all shadow-sm active:scale-95 cursor-pointer"
+                    >
+                      <Square className="w-4 h-4 fill-current" />
+                      예측 중지
+                    </button>
+                  ) : (
+                    <button
+                      onClick={startPredictionLoop}
+                      disabled={!isCameraOn || !modelLoaded}
+                      className="flex items-center justify-center gap-2 py-3 bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-200 disabled:text-slate-400 text-white rounded-xl font-black font-title text-sm transition-all shadow-sm active:scale-95 disabled:pointer-events-none cursor-pointer"
+                    >
+                      <Play className="w-4 h-4 fill-current" />
+                      예측 시작
+                    </button>
+                  )}
+                </div>
+
+                {/* Video Feed Screen */}
+                <div className="relative aspect-video w-full bg-slate-900 rounded-2xl overflow-hidden border border-amber-200/50 shadow-inner flex items-center justify-center">
+                  <video
+                    ref={videoRef}
+                    className={`w-full h-full object-cover ${isCameraOn ? 'block' : 'hidden'}`}
+                    playsInline
+                    muted
+                  />
+                  {!isCameraOn && (
+                    <div className="flex flex-col items-center justify-center text-center text-slate-500 p-6 gap-3">
+                      <Video className="w-12 h-12 text-slate-700 animate-pulse" />
+                      <div className="text-xs">
+                        <span className="font-bold text-slate-400 block mb-1">카메라 화면이 꺼져 있습니다</span>
+                        장치를 선택한 후 [카메라 켜기] 버튼을 눌러 카메라를 연동해 주세요.
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Real-time Classification Results Card */}
+              <div className="bg-amber-50/80 border border-amber-100/90 rounded-2xl p-5 flex flex-col gap-4 shadow-sm">
+                <div className="flex items-center gap-2 text-amber-800">
+                  <Activity className="w-5.5 h-5.5" />
+                  <h2 className="text-lg sm:text-xl font-black tracking-wide font-title">
+                    실시간 분류 결과
+                  </h2>
+                </div>
+
+                {predictions.length === 0 ? (
+                  <div className="border border-dashed border-amber-200 bg-white/60 rounded-xl p-8 text-center text-xs text-slate-500 flex flex-col items-center justify-center gap-2">
+                    <Activity className="w-8 h-8 text-amber-500/40" />
+                    <div>
+                      {modelLoaded && isCameraOn ? (
+                        <span>[예측 시작] 버튼을 누르면 실시간 이미지 분석이 구동됩니다.</span>
+                      ) : (
+                        <span>티쳐블 머신 모델을 로드하고 카메라를 켠 뒤 예측을 시작해 주세요.</span>
+                      )}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="bg-white/95 border border-amber-100/60 rounded-xl p-4 flex flex-col gap-3 shadow-inner">
+                    {predictions.map((p) => {
+                      const percentage = Math.round(p.probability * 100);
+                      const isTopClass = p.probability === Math.max(...predictions.map(pred => pred.probability)) && p.probability >= probabilityThreshold;
+                      
+                      return (
+                        <div key={p.className} className={`flex flex-col gap-1 p-2 rounded-lg transition-all ${isTopClass ? 'bg-amber-100/50 border border-amber-200/50' : ''}`}>
+                          <div className="flex justify-between items-center text-xs">
+                            <span className={`font-bold font-mono ${isTopClass ? 'text-amber-800' : 'text-slate-600'}`}>
+                              {p.className} {isTopClass && <span className="text-[10px] bg-amber-600 text-white px-1.5 py-0.5 rounded-full ml-1">TOP & ACTIVE</span>}
+                            </span>
+                            <span className={`font-black font-mono ${isTopClass ? 'text-amber-800' : 'text-slate-600'}`}>{percentage}%</span>
+                          </div>
+                          <div className="w-full h-2.5 bg-slate-100 rounded-full overflow-hidden">
+                            <div 
+                              className={`h-full rounded-full transition-all duration-75 ${isTopClass ? 'bg-gradient-to-r from-amber-500 to-amber-600' : 'bg-slate-300'}`}
+                              style={{ width: `${percentage}%` }}
+                            />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </section>
+
+            {/* Right Column - Model Settings, Controls & Logs */}
+            <section className="lg:col-span-6 flex flex-col gap-6">
+              
+              {/* Teachable Machine Model Loader Card */}
+              <div className="bg-amber-50/80 border border-amber-100/90 rounded-2xl p-5 flex flex-col gap-4 shadow-sm">
+                <div className="flex items-center gap-2 text-amber-800">
+                  <HardDrive className="w-5.5 h-5.5" />
+                  <h2 className="text-lg sm:text-xl font-black tracking-wide font-title">
+                    티쳐블 머신 모델 연결
+                  </h2>
+                </div>
+
+                <p className="text-xs text-slate-600 leading-relaxed">
+                  Teachable Machine에서 학습된 이미지/포즈 모델의 **공유 가능한 업로드 URL**을 입력해 주세요. (예: `https://teachablemachine.withgoogle.com/models/xxxxxx/`)
+                </p>
+
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={modelUrl}
+                    onChange={(e) => setModelUrl(e.target.value)}
+                    placeholder="https://teachablemachine.withgoogle.com/models/..."
+                    disabled={isModelLoading}
+                    className="flex-1 bg-white border border-amber-200/60 rounded-xl px-4 py-2.5 text-xs text-slate-800 placeholder:text-slate-400 focus:outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500 transition-all shadow-inner"
+                  />
+                  <button
+                    onClick={loadTeachableModel}
+                    disabled={isModelLoading || !modelUrl.trim()}
+                    className="px-4 py-2.5 bg-amber-600 hover:bg-amber-500 rounded-xl text-white font-bold text-xs flex items-center justify-center gap-1.5 transition-all shadow-sm disabled:opacity-40 disabled:cursor-not-allowed enabled:active:scale-95 flex-shrink-0"
+                  >
+                    {isModelLoading ? (
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Plus className="w-3.5 h-3.5" />
+                    )}
+                    로드
+                  </button>
+                </div>
+
+                {modelLoaded && (
+                  <div className="bg-white p-3 border border-amber-100 rounded-xl flex flex-col gap-1.5 shadow-sm text-xs text-slate-600">
+                    <span className="font-bold text-amber-800">● 모델 로드 성공</span>
+                    <span>불러온 클래스 목록 ({classes.length}개):</span>
+                    <div className="flex flex-wrap gap-1 mt-1">
+                      {classes.map(c => (
+                        <span key={c} className="bg-amber-50 border border-amber-100 text-amber-800 text-[10px] font-bold px-2 py-0.5 rounded-md">
+                          {c}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Serial Automation Configuration Card */}
+              <div className="bg-amber-50/80 border border-amber-100/90 rounded-2xl p-5 flex flex-col gap-4 shadow-sm">
+                <div className="flex items-center gap-2 text-amber-800">
+                  <Zap className="w-5.5 h-5.5" />
+                  <h2 className="text-lg sm:text-xl font-black tracking-wide font-title">
+                    시리얼 자동 제어 설정
+                  </h2>
+                </div>
+
+                {!isConnected ? (
+                  <div className="text-xs bg-white border border-rose-100/50 rounded-xl p-3.5 text-rose-800/80 flex items-start gap-2">
+                    <AlertCircle className="w-4 h-4 text-rose-500 flex-shrink-0 mt-0.5" />
+                    <div>
+                      <span className="text-rose-600 font-bold block mb-0.5">ESP32 보드가 연결되지 않았습니다.</span>
+                      시리얼 전송을 자동화하려면 먼저 상단 헤더에서 보드를 연결해 주세요.
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex flex-col gap-4">
+                    {/* Controls Row */}
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      {/* Serial Send Switch */}
+                      <div className="bg-white p-3 border border-amber-100 rounded-xl flex items-center justify-between shadow-sm">
+                        <span className="text-xs font-bold text-slate-700">시리얼 실시간 송출</span>
+                        <button
+                          onClick={() => setIsSerialSendActive(!isSerialSendActive)}
+                          className={`w-11 h-6 flex items-center rounded-full p-1 cursor-pointer transition-all duration-200 ${isSerialSendActive ? 'bg-amber-600' : 'bg-slate-300'}`}
+                        >
+                          <div className={`bg-white w-4 h-4 rounded-full shadow-md transform transition-all duration-200 ${isSerialSendActive ? 'translate-x-5' : 'translate-x-0'}`} />
+                        </button>
+                      </div>
+
+                      {/* Transmission Interval */}
+                      <div className="bg-white p-3 border border-amber-100 rounded-xl flex items-center justify-between shadow-sm">
+                        <span className="text-xs font-bold text-slate-700">전송 주기 설정</span>
+                        <select
+                          value={sendInterval}
+                          onChange={(e) => setSendInterval(Number(e.target.value))}
+                          className="bg-slate-50 border border-slate-200 rounded-lg p-1 px-2 text-xs text-slate-700 focus:outline-none"
+                        >
+                          <option value={100}>100ms</option>
+                          <option value={200}>200ms</option>
+                          <option value={500}>500ms</option>
+                          <option value={1000}>1.0초</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    {/* Probability Threshold Slider */}
+                    <div className="bg-white p-3.5 border border-amber-100 rounded-xl flex flex-col gap-2 shadow-sm">
+                      <div className="flex justify-between text-xs font-bold text-slate-700">
+                        <span>전송 임계 확률 (Threshold)</span>
+                        <span className="text-amber-700">{Math.round(probabilityThreshold * 100)}%</span>
+                      </div>
+                      <input
+                        type="range"
+                        min="0.30"
+                        max="0.99"
+                        step="0.05"
+                        value={probabilityThreshold}
+                        onChange={(e) => setProbabilityThreshold(Number(e.target.value))}
+                        className="w-full accent-amber-600 h-1.5 bg-slate-200 rounded-lg cursor-pointer"
+                      />
+                      <span className="text-[10px] text-slate-400">가장 유력한 클래스의 예측 신뢰도가 이 수치를 넘을 때만 시리얼로 전송합니다.</span>
+                    </div>
+
+                    {/* Class Mapping Configuration Table */}
+                    {classes.length > 0 && (
+                      <div className="bg-white border border-amber-100 rounded-xl p-3.5 shadow-sm flex flex-col gap-2">
+                        <span className="text-[10px] text-amber-700 font-bold uppercase tracking-wider">클래스별 시리얼 전송 명령어 지정</span>
+                        <div className="flex flex-col gap-2 max-h-[200px] overflow-y-auto pr-1">
+                          {classes.map((className) => (
+                            <div key={className} className="flex items-center justify-between gap-3 bg-slate-50 border border-slate-100 p-2 rounded-lg">
+                              <span className="text-xs font-mono font-bold text-slate-700 truncate max-w-[150px]">{className}</span>
+                              <input
+                                type="text"
+                                value={classMappings[className] || ''}
+                                onChange={(e) => {
+                                  setClassMappings({
+                                    ...classMappings,
+                                    [className]: e.target.value
+                                  });
+                                }}
+                                placeholder="예: LED_ON"
+                                className="w-1/2 bg-white border border-slate-200 rounded-md p-1 px-2.5 text-xs font-mono focus:outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500 transition-all"
+                              />
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Real-time Serial Transmission Logs Panel */}
+              <div className="bg-amber-50/80 border border-amber-100/90 rounded-2xl flex flex-col h-[280px] shadow-sm overflow-hidden">
+                <div className="px-4 py-3 border-b border-amber-100 flex justify-between items-center flex-shrink-0 bg-white/40">
+                  <div className="flex items-center gap-2 text-amber-800">
+                    <TerminalIcon className="w-5.5 h-5.5" />
+                    <span className="text-sm sm:text-base font-black tracking-wide font-title">AI 시리얼 전송 로그</span>
+                  </div>
+
+                  <button
+                    onClick={() => setAiSerialLogs([])}
+                    className="flex items-center gap-1 text-[10px] font-bold px-2 py-1 bg-white border border-amber-200 hover:bg-amber-100 text-amber-700 transition-all rounded-md shadow-sm"
+                  >
+                    <Trash2 className="w-3 h-3" />
+                    비우기
+                  </button>
+                </div>
+
+                <div ref={aiSerialLogsContainerRef} className="flex-grow p-4 m-4 mt-2 bg-white/90 border border-amber-100/60 rounded-xl overflow-y-auto font-mono text-xs text-amber-950 leading-relaxed shadow-inner focus:outline-none">
+                  {aiSerialLogs.length === 0 ? (
+                    <div className="text-center text-slate-400 italic py-10">대기 중... (시리얼 전송이 활성화되면 여기에 로그가 출력됩니다)</div>
+                  ) : (
+                    <div className="flex flex-col gap-1 select-text">
+                      {aiSerialLogs.map((log, idx) => (
+                        <div key={idx} className="whitespace-pre-wrap font-mono py-0.5 border-b border-slate-100/50">{log}</div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+            </section>
+          </div>
         )}
 
       </main>
@@ -2323,6 +2961,7 @@ export default function App() {
       {/* Page Footer */}
       <footer className="py-6 border-t border-slate-200 text-center text-xs text-slate-400 bg-white">
         <p>© 2026 VibeESP32 - Web Serial API & MicroPython IoT Control Dashboard</p>
+        <p className="mt-1">(주)제이에스에듀랩, PARKJISOOK</p>
       </footer>
     </div>
   );

@@ -695,34 +695,22 @@ export default async function handler(req: Request) {
     }
 
     const cleanPrompt = prompt.toLowerCase().replace(/\s+/g, '');
-    
-    // Check specific/complex modules first to prevent general keywords (like wifi or neopixel) from intercepting them
-    if (cleanPrompt.includes('tcs34725') || cleanPrompt.includes('컬러센서')) {
-      return streamStaticCode(TCS34725_CODE);
-    }
-    if (cleanPrompt.includes('서울날씨') || cleanPrompt.includes('서울의실시간날씨') || (cleanPrompt.includes('날씨') && cleanPrompt.includes('서울'))) {
-      return streamStaticCode(WEATHER_CODE);
-    }
 
-    if (cleanPrompt.includes('테트리스') || cleanPrompt.includes('tetris') || cleanPrompt.includes('게임')) {
-      return streamStaticCode(TETRIS_CODE);
-    }
-    
-    // Check specific/complex modules first to prevent general keywords (like wifi) from intercepting them
-    if (cleanPrompt.includes('dht11') || cleanPrompt.includes('온습도') || cleanPrompt.includes('dht') || cleanPrompt.includes('27번')) {
-      return streamStaticCode(DHT11_CODE);
-    }
-    if (cleanPrompt.includes('neopixel') || cleanPrompt.includes('네오픽셀') || cleanPrompt.includes('무지개') || cleanPrompt.includes('14번')) {
-      return streamStaticCode(NEOPIXEL_CODE);
-    }
-    if (cleanPrompt.includes('웹서버') || cleanPrompt.includes('webserver') || cleanPrompt.includes('웹페이지') || cleanPrompt.includes('소켓') || cleanPrompt.includes('서버')) {
-      return streamStaticCode(WEBSERVER_CODE);
-    }
-    if (cleanPrompt.includes('led') && (cleanPrompt.includes('깜빡') || cleanPrompt.includes('반복') || cleanPrompt.includes('1초'))) {
-      return streamStaticCode(LED_CODE);
-    }
-    if (cleanPrompt.includes('wifi') || cleanPrompt.includes('와이파이') || cleanPrompt.includes('인터넷')) {
-      return streamStaticCode(WIFI_CODE);
+    // Only intercept exact template suggestion button prompts — custom user input always goes to the AI
+    const TEMPLATE_MAP: [string, string][] = [
+      ['esp32내장led(gpio2번)를0.5초간격으로깜빡이는무한루프코드를작성해줘.', LED_CODE],
+      ['esp32를특정wifissid와password에연결하고,연결에성공하면ip주소를터미널에출력하는코드를작성해줘.', WIFI_CODE],
+      ['gpio27번에연결된dht11센서에서온도와습도를2초간격으로읽어와서터미널에출력해줘.센서오류예외처리도포함해줘.', DHT11_CODE],
+      ['gpio14번에연결된12구neopixelled바에무지개회전효과(rainbowcycle)를내는코드를작성해줘.', NEOPIXEL_CODE],
+      ['esp32가wifi에접속한후간단한웹서버를열어서,접속한클라이언트에게"hellofromvibeesp32!"메시지를담은html페이지를반환하는코드를작성해줘.', WEBSERVER_CODE],
+      ['softi2c와ssd1306을사용해128x64oled디스플레이에서구동되는테트리스게임코드를작성해줘.', TETRIS_CODE],
+      ['오픈웨더맵api를활용하여서울의실시간날씨를가져와시리얼모니터와oled디스플레이에출력하고,날씨정보에따라neopixel색상을파란색(비/눈),주황색(맑음),흰색(흐림)등으로제어하는코드를작성해줘.', WEATHER_CODE],
+      ['gpio17(sda)과gpio16(scl)에연결된tcs34725컬러센서에서컬러값을읽어와,감지한색상과동일한색으로gpio14에연결된neopixelled를켜는스마트무드등코드를작성해줘.', TCS34725_CODE],
+    ];
+
+    const matched = TEMPLATE_MAP.find(([key]) => cleanPrompt === key);
+    if (matched) {
+      return streamStaticCode(matched[1]);
     }
 
     const apiKey = process.env.GEMINI_API_KEY;
@@ -771,6 +759,8 @@ ESP32 / MICROPYTHON HARDWARE CONSTRAINTS (follow strictly):
 - Always declare modified globals with the 'global' keyword inside functions
 - Every while True loop must contain time.sleep_ms(10) or equivalent to prevent watchdog timer resets
 - Wrap all hardware I/O (sensors, I2C, SPI, network, file) in try-except blocks
+- NEVER use sys.stdin.readable(), sys.stdin.writable(), sys.stdin.buffer, or sys.stdin.any() — these do NOT exist in MicroPython. For NON-BLOCKING serial input use select.poll(): import select; poller = select.poll(); poller.register(sys.stdin, select.POLLIN); then in the loop: if poller.poll(0): data = sys.stdin.read(1). For blocking input use sys.stdin.readline() directly.
+- When reading single characters with sys.stdin.read(1) in a loop, ALWAYS skip '\r' and '\n' immediately after reading (serial clients always append these as line terminators): if data in ('\r', '\n', ' '): continue
 - Available built-in libraries: machine, time, network, socket, random, os, sys, ubinascii, neopixel, dht
 - Valid ESP32 GPIO pins: 0,2,4,5,12,13,14,15,16,17,18,19,21,22,23,25,26,27,32,33,34,35,36,39
 - GPIO 34, 35, 36, 39 are INPUT ONLY — never configure them as output

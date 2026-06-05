@@ -668,5 +668,52 @@ while True:
   수집된 원시 적색 조도값(r)을 전체 수광 광량(c)으로 나누어 명도 변화에 중립적인 순수 색상비를 추출합니다. 여기에 8비트 상한 상수인 255와 시인성 보정을 위한 상수 1.5를 곱해 형변환(int)을 가하는 색상 보정 수식입니다.
 ▶️ red = min(max(r_scale, 0), 255)
   수치 처리된 데이터가 8비트 가용 컬러 범위(0~255)를 벗어나 오버플로우나 언더플로우를 일으키지 않도록 최소 제한(max)과 최대 제한(min) 중첩 함수를 사용하여 데이터를 안전한 한계 내로 고정 및 클리핑합니다.`
+  },
+  {
+    label: '🤖 AI Teachable Machine 시리얼 제어',
+    code: `# VibeESP32 - AI Teachable Machine 시리얼 수신 제어
+import machine
+import sys
+import time
+
+# 제어 대상 핀 설정 (예: GPIO 2번 내장 LED)
+led = machine.Pin(2, machine.Pin.OUT)
+
+print("[시스템] AI Teachable Machine 시리얼 제어 수신 대기 중...")
+print("[시스템] 클래스별로 전송된 명령어를 줄 단위(\\n)로 수신하여 처리합니다.")
+
+while True:
+    # 시리얼(sys.stdin)로부터 데이터가 수신되었는지 확인
+    # sys.stdin.readline()은 입력을 받을 때까지 대기(블로킹)합니다.
+    line = sys.stdin.readline().strip()
+    
+    if line:
+        print("[수신] " + line)
+        
+        # 수신된 명령어에 따라 LED 제어
+        if line == "LED_ON":
+            led.value(1)
+            print("LED가 켜졌습니다. (ON)")
+        elif line == "LED_OFF":
+            led.value(0)
+            print("LED가 꺼졌습니다. (OFF)")
+        else:
+            print("알 수 없는 명령어 수신: " + line)
+            
+    time.sleep_ms(10)
+`,
+    explanation: `💡 1. 전체 알고리즘 구조
+📌 시리얼 데이터 수신 및 실시간 GPIO 제어 알고리즘
+  웹앱의 AI 카메라 분류 기능에서 Web Serial API를 거쳐 ESP32 보드로 송신한 텍스트 기반 명령어를 실시간으로 파싱하고 반응합니다. sys.stdin.readline() 호출을 통해 표준 입력 버퍼에 개행 문자(\\n)가 수신될 때까지 대기하며, 입력된 라인이 감지되면 공백을 제거한 후 문자열을 분석하여 일치하는 키워드("LED_ON" 또는 "LED_OFF")에 따라 디지털 출력 핀(GPIO 2)의 레벨을 제어하고 시리얼 응답을 출력하는 동기화 이벤트 처리 구조입니다.
+
+🔍 2. 주요 코드 라인별 세부 설명
+▶️ led = machine.Pin(2, machine.Pin.OUT)
+  machine 모듈의 Pin 클래스를 호출하여 GPIO 2번 단자(일반적으로 보드의 파란색 내장 LED가 직결됨)를 디지털 신호 출력 전용(Pin.OUT) 상태로 초기화합니다.
+▶️ line = sys.stdin.readline().strip()
+  sys 모듈의 stdin(표준 입력 스트림) 인터페이스를 사용하여 시리얼 케이블을 타고 들어온 직렬 문자 데이터의 텍스트 한 행을 가져옵니다. strip() 메서드를 체이닝하여 뒤에 달라붙은 줄바꿈 문자(\\r, \\n) 및 무효 공백을 깨끗하게 정리(Trim)합니다.
+▶️ if line:
+  수신 가공된 데이터 문자열인 line에 실질적인 글자가 들어있어 비어있지 않은 상태(Truthy)인지 판별하여, 시리얼 입력 데이터가 존재할 때만 내부 파싱 로직을 동작시킵니다.
+▶️ led.value(1)
+  Pin 객체의 value 메서드에 디지털 신호값 1(High, 3.3V)을 인가하여 내장 LED 회로를 켜는 명령을 실행합니다.`
   }
 ];
