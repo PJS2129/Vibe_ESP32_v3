@@ -406,7 +406,23 @@ export default function App() {
   // Firebase Google Login & Logout handlers
   const signInWithGoogle = async () => {
     if (!isFirebaseConfigured) {
-      alert("Firebase 설정이 활성화되지 않았습니다. 루트 폴더의 .env.local 파일에 설정 정보를 등록해 주세요.");
+      const isVercel = window.location.hostname.includes('vercel.app');
+      if (isVercel) {
+        alert(
+          "Firebase 설정이 활성화되지 않았습니다.\n\n" +
+          "Vercel 프로젝트 설정의 [Environment Variables] 메뉴에서 다음 환경 변수들을 등록해 주세요:\n" +
+          "1. VITE_FIREBASE_API_KEY\n" +
+          "2. VITE_FIREBASE_AUTH_DOMAIN\n" +
+          "3. VITE_FIREBASE_PROJECT_ID\n" +
+          "4. VITE_FIREBASE_STORAGE_BUCKET\n" +
+          "5. VITE_FIREBASE_MESSAGING_SENDER_ID\n" +
+          "6. VITE_FIREBASE_APP_ID\n" +
+          "7. GEMINI_API_KEY (AI 기능용)\n\n" +
+          "등록 후 프로젝트를 다시 배포(Redeploy)해야 설정이 적용됩니다."
+        );
+      } else {
+        alert("Firebase 설정이 활성화되지 않았습니다. 루트 폴더의 .env.local 파일에 설정 정보를 등록해 주세요.");
+      }
       return;
     }
     try {

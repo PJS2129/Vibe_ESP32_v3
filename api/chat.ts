@@ -715,8 +715,12 @@ export default async function handler(req: Request) {
 
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) {
+      const isVercel = !!process.env.VERCEL;
+      const errorMsg = isVercel
+        ? 'Gemini API Key가 설정되지 않았습니다. Vercel 프로젝트 설정의 Environment Variables에 GEMINI_API_KEY를 추가해 주세요.'
+        : 'Gemini API Key가 설정되지 않았습니다. .env.local 파일에 GEMINI_API_KEY를 추가해 주세요.';
       return new Response(
-        JSON.stringify({ error: 'Gemini API Key가 설정되지 않았습니다. .env.local 파일에 GEMINI_API_KEY를 추가해 주세요.' }),
+        JSON.stringify({ error: errorMsg }),
         { status: 500, headers: { 'Content-Type': 'application/json' } }
       );
     }
